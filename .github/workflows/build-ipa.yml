@@ -1,0 +1,77 @@
+# Builds an unsigned FreeTube.ipa for sideloading (AltStore / Sideloadly re-sign it with the user's Apple ID).
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'screenshots/**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipa
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      XCODE_APP: /Applications/Xcode_26.2.app
+      PROJECT: FreeTube/FreeTube.xcodeproj
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+          xcodebuild -list -project "$PROJECT"
+
+      - name: Resolve Swift packages
+        run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme FreeTube -clonedSourcePackagesDirPath spm
+
+      - name: Build (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project "$PROJECT" -scheme FreeTube -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build -clonedSourcePackagesDirPath spm \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)|\*\* ' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+
+      - name: Package IPA
+        run: |
+          APP=build/Build/Products/Release-iphoneos/FreeTube.app
+          test -d "$APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry FreeTube.ipa Payload
+          ls -lh FreeTube.ipa
+          shasum -a 256 FreeTube.ipa | tee FreeTube.ipa.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreeTube-ipa
+          path: |
+            FreeTube.ipa
+            FreeTube.ipa.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" FreeTube.ipa FreeTube.ipa.sha256 \
+            --title "FreeTube unsigned IPA (${TAG})" \
+            --notes "Unsigned build of ${GITHUB_SHA::7}. Sideload with AltStore; it re-signs the app with your Apple ID." \
+            --latest
