@@ -41,6 +41,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build -clonedSourcePackagesDirPath spm \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            ENABLE_DEBUG_DYLIB=NO ENABLE_PREVIEWS=NO \
             2>&1 | tee build.log | grep -E 'error:|BUILD (SUCCEEDED|FAILED)|\*\* ' || true
           grep -q 'BUILD SUCCEEDED' build.log
 
@@ -48,6 +49,11 @@ jobs:
         run: |
           APP=build/Build/Products/Release-iphoneos/FreeTube.app
           test -d "$APP"
+          # Re-signing tools only sign the main binary and nested bundles, so loose dylibs must not ship.
+          if find "$APP" -name '*.dylib' -not -path '*/Frameworks/*' | grep .; then
+            echo "Unexpected loose dylibs in app bundle" >&2
+            exit 1
+          fi
           rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
           zip -qry FreeTube.ipa Payload
           ls -lh FreeTube.ipa
