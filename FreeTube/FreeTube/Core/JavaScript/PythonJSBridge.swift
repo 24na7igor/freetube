@@ -49,6 +49,7 @@ nonisolated enum PythonJSBridge {
     /// heap-allocated bridge; we keep a Swift-side strong ref so the bridge isn't torn
     /// down while Python still holds the function as `builtins.eval_js`.
     private static var retainedEvalJS: PythonFunction?
+    private static var retainedLog: PythonFunction?
 
     /// Installs all four pieces. Safe to call multiple times — each piece guards against
     /// double-install (re-binding `builtins.eval_js`, idempotent `sys.modules` writes,
@@ -78,11 +79,16 @@ nonisolated enum PythonJSBridge {
                 throw PythonError.exception(err, traceback: nil)
             }
 
+            let started = Date()
             let wrapped = wrapForStdoutCapture(code)
             do {
                 let result = try JSEvaluator.evaluate(wrapped)
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                log.info("eval_js ok in=\(code.utf8.count, privacy: .public)B out=\(result.utf8.count, privacy: .public)B \(ms, privacy: .public)ms head=\(String(result.prefix(160)), privacy: .public)")
                 return PythonObject(result)
             } catch {
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                log.error("eval_js failed in=\(code.utf8.count, privacy: .public)B \(ms, privacy: .public)ms: \(String(describing: error), privacy: .public)")
                 let builtins = Python.import("builtins")
                 let err = builtins.RuntimeError("eval_js: \(String(describing: error))")
                 throw PythonError.exception(err, traceback: nil)
@@ -90,8 +96,17 @@ nonisolated enum PythonJSBridge {
         }
         retainedEvalJS = evalJS
 
+        // `__ft_log__(msg)` lets the Popen extension below report which path a fake-deno call
+        // took; Python's own stdout/stderr never reach the device log.
+        let ftLog = PythonFunction { (args: PythonObject) -> PythonConvertible in
+            log.notice("py: \(String(args[0]) ?? "<non-string>", privacy: .public)")
+            return Python.None
+        }
+        retainedLog = ftLog
+
         let builtins = Python.import("builtins")
         builtins.eval_js = evalJS.pythonObject
+        builtins.__ft_log__ = ftLog.pythonObject
     }
 
     /// Wraps yt-dlp's stdin-style JS payload in an IIFE that:
@@ -277,8 +292,19 @@ nonisolated enum PythonJSBridge {
                 return False
             return cmd[0] == _FAKE_DENO_PATH
 
+        def _ft_log(msg):
+            try:
+                builtins.__ft_log__(msg)
+            except Exception:
+                pass
+
         def _patched_init(self, *args, **kwargs):
             self._ft_deno = False
+            try:
+                _argv0 = args[0][0] if isinstance(args[0], (list, tuple)) and args[0] else args[0]
+            except Exception:
+                _argv0 = '?'
+            _ft_log(f'Popen init argv0={_argv0!r} deno={_is_deno_argv(args)} kwargs={sorted(kwargs)}')
             if _is_deno_argv(args):
                 self._ft_deno = True
                 self._ft_cmd = args[0]
@@ -320,15 +346,18 @@ nonisolated enum PythonJSBridge {
                 stdin_str = str(stdin)
 
             text_mode = getattr(self, '_ft_text_mode', True)
+            _ft_log(f'deno communicate stdin={type(stdin).__name__} len={len(stdin_str)} args={len(args)} kwargs={sorted(kwargs)} text={text_mode}')
             try:
                 result = builtins.eval_js(stdin_str)
                 self.returncode = 0
+                _ft_log(f'deno communicate result={type(result).__name__} len={len(str(result))} head={str(result)[:80]!r}')
                 if text_mode:
                     return (str(result), '')
                 else:
                     return (str(result).encode('utf-8'), b'')
             except Exception as e:
                 self.returncode = 1
+                _ft_log(f'deno communicate eval_js raised {type(e).__name__}: {e}')
                 err_msg = f'freetube-jscore-shim: {e}'
                 if text_mode:
                     return ('', err_msg)
