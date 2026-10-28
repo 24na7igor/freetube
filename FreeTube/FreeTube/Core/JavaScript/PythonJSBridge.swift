@@ -72,8 +72,11 @@ nonisolated enum PythonJSBridge {
     /// modification. `JSContext` doesn't ship a `console` global, so the prologue defines
     /// one inside the evaluation scope.
     private static func installEvalJSBuiltin() {
-        let evalJS = PythonFunction { (args: PythonObject) -> PythonConvertible in
-            guard let code = String(args[0]) else {
+        // PythonKit's single-parameter `PythonFunction` init hands the closure the first
+        // positional argument itself, not the argument tuple — so `argument` is the JS source.
+        // Indexing it (`argument[0]`) would yield only its first character.
+        let evalJS = PythonFunction { (argument: PythonObject) -> PythonConvertible in
+            guard let code = String(argument) else {
                 let builtins = Python.import("builtins")
                 let err = builtins.TypeError("eval_js: first argument must be a string")
                 throw PythonError.exception(err, traceback: nil)
@@ -98,8 +101,8 @@ nonisolated enum PythonJSBridge {
 
         // `__ft_log__(msg)` lets the Popen extension below report which path a fake-deno call
         // took; Python's own stdout/stderr never reach the device log.
-        let ftLog = PythonFunction { (args: PythonObject) -> PythonConvertible in
-            log.notice("py: \(String(args[0]) ?? "<non-string>", privacy: .public)")
+        let ftLog = PythonFunction { (message: PythonObject) -> PythonConvertible in
+            log.notice("py: \(String(message) ?? "<non-string>", privacy: .public)")
             return Python.None
         }
         retainedLog = ftLog
