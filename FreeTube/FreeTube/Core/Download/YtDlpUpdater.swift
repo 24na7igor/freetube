@@ -44,6 +44,13 @@ final class YtDlpUpdater {
     /// roughly weekly, so a 7-day TTL aligns with how often there's something new to pull.
     static let ttl: TimeInterval = 7 * 24 * 60 * 60
 
+    /// yt-dlp release we download instead of `releases/latest`. `Python-iOS` embeds Python 3.10,
+    /// and yt-dlp 2026.10.26 raised its floor to 3.11 — importing it fails with "unsupported
+    /// version of Python". 2026.10.21 is the last release that still runs on 3.10, and its
+    /// vendored EJS version (0.8.0) matches our bundled solver. Bump only together with the
+    /// embedded Python (and re-check `EJSResources.version`).
+    static let pinnedVersion = "2026.10.21"
+
     private let log = AppLog(subsystem: "com.leshko.freetube", category: "YtDlpUpdater")
     private let preferences = UserPreferences()
 
@@ -97,9 +104,14 @@ final class YtDlpUpdater {
         isUpdating = true
         defer { isUpdating = false }
 
-        log.info("Downloading yt-dlp (force=\(force, privacy: .public))")
+        log.info("Downloading yt-dlp \(Self.pinnedVersion, privacy: .public) (force=\(force, privacy: .public))")
+        guard let downloadURL = URL(string: "https://github.com/yt-dlp/yt-dlp/releases/download/\(Self.pinnedVersion)/yt-dlp") else {
+            let result = UpdateResult.failure(message: "Invalid yt-dlp download URL")
+            lastResult = result
+            return result
+        }
         do {
-            try await YoutubeDL.downloadPythonModule()
+            try await YoutubeDL.downloadPythonModule(from: downloadURL)
         } catch {
             let msg = "Download failed: \(error.localizedDescription)"
             log.error("\(msg, privacy: .public)")
